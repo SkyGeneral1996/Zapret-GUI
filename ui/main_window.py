@@ -1,14 +1,15 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressDialog, QPushButton, QSystemTrayIcon, QMenu,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from core import zapret, updater
+from core import github, zapret, updater
+from core import service as svc
 from ui.settings_dialog import SettingsDialog
 from ui.manager_tab import ManagerTab
 from ui.workers import CheckWorker, ZapretInstallWorker, AppInstallWorker
@@ -39,7 +40,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_tray()
-        self.manager.check_updates.connect(lambda: self.check_updates(manual=True))
+        self.manager.check_updates.connect(lambda: self.check_updates(manual=True, mode="zapret"))
         self.manager.changed.connect(self._update_status)
         self._refresh_strategies()
         self._update_status()
@@ -104,11 +105,11 @@ class MainWindow(QMainWindow):
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.log.setFont(mono)
         run_lay.addWidget(self.log, 1)
-        self.tabs.addTab(run_tab, "Запуск")
 
         self.manager = ManagerTab(self.config, lambda: self.strategy_combo.currentText(), self)
         self.tabs.addTab(self.manager, "Менеджер")
-        self.tabs.setCurrentIndex(1)
+        self.tabs.addTab(run_tab, "Запуск")
+        self.tabs.setCurrentIndex(0)
         root.addWidget(self.tabs, 1)
 
         # update banner
@@ -125,8 +126,9 @@ class MainWindow(QMainWindow):
         root.addWidget(self.banner)
 
         bottom = QHBoxLayout()
-        self.check_btn = QPushButton("Проверить обновления")
-        self.check_btn.clicked.connect(lambda: self.check_updates(manual=True))
+        self.check_btn = QPushButton("Проверить обновления ПО")
+        self.check_btn.setToolTip("Проверить новую версию Zapret GUI в вашем GitHub-репозитории")
+        self.check_btn.clicked.connect(lambda: self.check_updates(manual=True, mode="app"))
         self.settings_btn = QPushButton("Настройки")
         self.settings_btn.clicked.connect(self.open_settings)
         self.clear_btn = QPushButton("Очистить лог")
@@ -148,10 +150,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn)
         row = {"layout": layout, "label": label, "btn": btn}
         if kind == "zapret":
-            btn.clicked.connect(self.update_zapret)
+            btn.clicked.connect(self._zapret_row_clicked)
         else:
             btn.clicked.connect(self.update_app)
         return row
+
+    def _zapret_row_clicked(self):
+        rel = self._zapret_release
+        if rel and not github.pick_asset(rel, ".zip"):
+            QDesktopServices.openUrl(QUrl(rel.url))
+        else:
+            self.update_zapret()
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self._icon, self)
@@ -284,49 +293,65 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     # ---------- updates ----------
-    def check_updates(self, manual=False):
+    def check_updates(self, manual=False, mode="both"):
         if self._check_worker and self._check_worker.isRunning():
             return
+        d = self.config.zapret_dir
+        if not manual and mode == "both" and d and not svc.autoupdate_enabled(d):
+            mode = "app"
         self.check_btn.setEnabled(False)
         self.check_btn.setText("Проверка…")
         if manual:
-            self._sys("Проверка обновлений ...")
-        d = self.config.zapret_dir
+            what = {"app": "обновлений приложения", "zapret": "обновлений zapret",
+                    "both": "обновлений"}[mode]
+            self._sys(f"Проверка {what} ...")
         local = zapret.read_local_version(d) if d else "0"
-        self._check_worker = CheckWorker(local, self.config.app_repo, self)
-        self._check_worker.done.connect(lambda r: self._on_check_done(r, manual))
+        self._check_worker = CheckWorker(local, self.config.app_repo, mode, self)
+        self._check_worker.done.connect(lambda r: self._on_check_done(r, manual, mode))
         self._check_worker.start()
 
-    def _on_check_done(self, result, manual):
+    def _on_check_done(self, result, manual, mode):
         self.check_btn.setEnabled(True)
-        self.check_btn.setText("Проверить обновления")
-        self._zapret_release = result["zapret"]
-        self._app_release = result["app"]
+        self.check_btn.setText("Проверить обновления ПО")
+        if mode in ("both", "zapret"):
+            self._zapret_release = result["zapret"]
+            rel = self._zapret_release
+            if rel:
+                pending = not github.pick_asset(rel, ".zip")
+                self.zapret_upd_row["label"].setText(
+                    f"Доступна новая версия zapret: {rel.version}"
+                    + (" (релиз с архивом ещё не опубликован)" if pending else ""))
+                self.zapret_upd_row["btn"].setText("Страница релиза" if pending else "Обновить")
+                self.zapret_upd_row["btn"].show()
+                self.zapret_upd_row["label"].show()
+                if manual:
+                    self._sys(f"zapret: новая версия {rel.version} — {rel.url}")
+            else:
+                self.zapret_upd_row["btn"].hide()
+                self.zapret_upd_row["label"].hide()
+                if manual:
+                    self._sys(f"zapret: установлена последняя версия "
+                              f"{zapret.read_local_version(self.config.zapret_dir) or '?'}")
 
-        if self._zapret_release:
-            self.zapret_upd_row["label"].setText(
-                f"Доступна новая версия zapret: {self._zapret_release.version}")
-            self.zapret_upd_row["btn"].show()
-            self.zapret_upd_row["label"].show()
-        else:
-            self.zapret_upd_row["btn"].hide()
-            self.zapret_upd_row["label"].hide()
+        if mode in ("both", "app"):
+            self._app_release = result["app"]
+            if self._app_release:
+                self.app_upd_row["label"].setText(
+                    f"Доступна новая версия приложения: {self._app_release.version}")
+                self.app_upd_row["btn"].show()
+                self.app_upd_row["label"].show()
+            else:
+                self.app_upd_row["btn"].hide()
+                self.app_upd_row["label"].hide()
 
-        if self._app_release:
-            self.app_upd_row["label"].setText(
-                f"Доступна новая версия приложения: {self._app_release.version}")
-            self.app_upd_row["btn"].show()
-            self.app_upd_row["label"].show()
-        else:
-            self.app_upd_row["btn"].hide()
-            self.app_upd_row["label"].hide()
-
-        self.banner.setVisible(bool(self._zapret_release or self._app_release))
+        self.banner.setVisible(not self.zapret_upd_row["label"].isHidden()
+                               or not self.app_upd_row["label"].isHidden())
 
         if manual:
             if result["errors"]:
                 self._sys("Ошибки проверки: " + "; ".join(result["errors"]))
-            if not self._zapret_release and not self._app_release and not result["errors"]:
+            checked = [k for k in ("zapret", "app") if mode in ("both", k)]
+            if not any(result[k] for k in checked) and not result["errors"]:
                 QMessageBox.information(self, "Обновления", "Установлены последние версии.")
             for e in result["errors"]:
                 self._sys(e)

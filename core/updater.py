@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -10,6 +11,11 @@ from core import github
 from version import ZAPRET_REPO
 
 CREATE_NO_WINDOW = 0x08000000
+
+# Same source the original service.bat uses for its update check.
+ZAPRET_MAIN_VERSION_URL = (
+    f"https://raw.githubusercontent.com/{ZAPRET_REPO}/main/.service/version.txt"
+)
 
 # Files preserved across a zapret upgrade (user data / settings).
 USER_LISTS = [
@@ -26,11 +32,42 @@ USER_UTILS = [
 ]
 
 
+def fetch_zapret_main_version():
+    """Version published on the main branch, exactly like service.bat does."""
+    req = urllib.request.Request(ZAPRET_MAIN_VERSION_URL, headers={
+        "User-Agent": github.UA,
+        "Cache-Control": "no-cache",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode("utf-8", errors="replace").strip() or None
+    except Exception:
+        return None
+
+
 def check_zapret_update(local_version):
-    rel = github.get_latest_release(ZAPRET_REPO)
-    if rel and github.is_newer(rel.version, local_version or "0"):
+    """Original zapret check: main-branch version.txt vs LOCAL_VERSION.
+
+    Returns an installable Release when the release archive is already out,
+    otherwise a Release without assets (version announced, release pending).
+    """
+    local = local_version or "0"
+    main_ver = fetch_zapret_main_version()
+    if not main_ver or not github.is_newer(main_ver, local):
+        return None
+    try:
+        rel = github.get_latest_release(ZAPRET_REPO)
+    except Exception:
+        rel = None
+    if rel and github.is_newer(rel.version, local) and github.pick_asset(rel, ".zip"):
         return rel
-    return None
+    return github.Release(
+        tag=main_ver,
+        version=main_ver,
+        url=f"https://github.com/{ZAPRET_REPO}/releases/latest",
+        notes="Версия уже опубликована в main, но релиз с архивом ещё не вышел.",
+        assets=[],
+    )
 
 
 def check_app_update(repo, local_version):

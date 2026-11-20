@@ -4,8 +4,9 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from core import service as svc
@@ -152,7 +153,8 @@ class ManagerTab(QWidget):
         b_ipset_upd.clicked.connect(self._ipset_update)
         b_hosts = QPushButton("Обновить hosts файл")
         b_hosts.clicked.connect(self._hosts)
-        b_check = QPushButton("Проверить обновления")
+        b_check = QPushButton("Проверить обновления zapret")
+        b_check.setToolTip("Как пункт 10 в service.bat: версия из main-ветки репозитория Flowseal")
         b_check.clicked.connect(self.check_updates.emit)
         for b in (b_ipset_upd, b_hosts, b_check):
             up.addWidget(b)
@@ -251,9 +253,15 @@ class ManagerTab(QWidget):
         d = self._dir()
         if not d:
             return
-        bat = self.get_strategy()
-        if not bat:
-            QMessageBox.warning(self, "Ошибка", "Выберите стратегию на вкладке «Запуск».")
+        strategies = zapret.list_strategies(d)
+        if not strategies:
+            QMessageBox.warning(self, "Ошибка", "В папке zapret нет стратегий (*.bat).")
+            return
+        current = self.get_strategy()
+        idx = strategies.index(current) if current in strategies else 0
+        bat, ok = QInputDialog.getItem(
+            self, "Установка службы", "Стратегия для службы:", strategies, idx, False)
+        if not ok or not bat:
             return
         ans = QMessageBox.question(self, "Установка службы",
                                    f"Установить службу zapret со стратегией {bat}?\n"
@@ -363,7 +371,7 @@ class ManagerTab(QWidget):
         d = self._dir()
         if not d:
             return
-        parent = self.parent()
+        parent = self.window()
         if self.test_scope.currentData() == "one":
             bat = parent.strategy_combo.currentText() if parent else ""
             configs = [bat] if bat else []
@@ -417,7 +425,7 @@ class ManagerTab(QWidget):
         self.g_results.show()
         self._scroll.ensureWidgetVisible(self.g_results)
         self._log(f"Тесты завершены. Лучшая стратегия: {best or 'не определена'}")
-        parent = self.parent()
+        parent = self.window()
         if self._test_was_running and parent:
             self._log("Восстановление ранее работавшей стратегии ...")
             parent.start_strategy()
@@ -425,6 +433,6 @@ class ManagerTab(QWidget):
     def _on_tests_error(self, msg):
         self._tests_finished()
         self._log(f"[X] {msg}")
-        parent = self.parent()
+        parent = self.window()
         if getattr(self, "_test_was_running", False) and parent:
             parent.start_strategy()

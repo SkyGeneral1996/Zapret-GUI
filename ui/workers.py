@@ -9,18 +9,20 @@ from version import APP_VERSION, ZAPRET_REPO
 class CheckWorker(QThread):
     done = Signal(object)  # dict: zapret, app, errors
 
-    def __init__(self, zapret_version, app_repo, parent=None):
+    def __init__(self, zapret_version, app_repo, mode="both", parent=None):
         super().__init__(parent)
         self._zapret_version = zapret_version
         self._app_repo = app_repo
+        self._mode = mode
 
     def run(self):
         result = {"zapret": None, "app": None, "errors": []}
-        try:
-            result["zapret"] = updater.check_zapret_update(self._zapret_version)
-        except Exception as e:
-            result["errors"].append(f"zapret: {e}")
-        if self._app_repo:
+        if self._mode in ("both", "zapret"):
+            try:
+                result["zapret"] = updater.check_zapret_update(self._zapret_version)
+            except Exception as e:
+                result["errors"].append(f"zapret: {e}")
+        if self._mode in ("both", "app") and self._app_repo:
             try:
                 result["app"] = updater.check_app_update(self._app_repo, APP_VERSION)
             except Exception as e:
