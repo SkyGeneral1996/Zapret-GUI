@@ -1,0 +1,164 @@
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+from core import github
+from version import ZAPRET_REPO
+
+CREATE_NO_WINDOW = 0x08000000
+
+# Files preserved across a zapret upgrade (user data / settings).
+USER_LISTS = [
+    "lists/list-general-user.txt",
+    "lists/list-exclude-user.txt",
+    "lists/ipset-exclude-user.txt",
+    "lists/ipset-all.txt",
+    "lists/ipset-all.txt.backup",
+]
+USER_UTILS = [
+    "utils/game_filter.enabled",
+    "utils/check_updates.enabled",
+    "utils/targets.txt",
+]
+
+
+def check_zapret_update(local_version):
+    rel = github.get_latest_release(ZAPRET_REPO)
+    if rel and github.is_newer(rel.version, local_version or "0"):
+        return rel
+    return None
+
+
+def check_app_update(repo, local_version):
+    if not repo:
+        return None
+    rel = github.get_latest_release(repo)
+    if rel and github.is_newer(rel.version, local_version):
+        if github.pick_asset(rel, ".exe"):
+            return rel
+    return None
+
+
+def _find_extracted_root(extract_dir):
+    extract_dir = Path(extract_dir)
+    if (extract_dir / "bin" / "winws.exe").exists():
+        return extract_dir
+    for sub in extract_dir.iterdir():
+        if sub.is_dir() and (sub / "bin" / "winws.exe").exists():
+            return sub
+    raise FileNotFoundError("bin/winws.exe not found in archive")
+
+
+def install_zapret_update(release, old_dir, progress=None, cancel=None, log=None):
+    """Download + extract new zapret next to old_dir, migrate user data.
+
+    Returns the new zapret directory Path. Old folder is left intact.
+    """
+    old_dir = Path(old_dir)
+    asset = github.pick_asset(release, ".zip")
+    if not asset:
+        raise FileNotFoundError("В релизе нет .zip архива")
+
+    def _log(msg):
+        if log:
+            log(msg)
+
+    tmp = Path(tempfile.mkdtemp(prefix="zapret_upd_"))
+    try:
+        zip_path = tmp / asset["name"]
+        _log(f"Скачивание {asset['name']} ...")
+        github.download(asset["url"], zip_path, progress=progress, cancel=cancel)
+
+        _log("Распаковка ...")
+        extract_dir = tmp / "extracted"
+        extract_dir.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir, filter="data")
+        new_root = _find_extracted_root(extract_dir)
+
+        target = old_dir.parent / new_root.name
+        if target.exists():
+            raise FileExistsError(f"Папка уже существует: {target}")
+
+        _log("Установка новой версии ...")
+        shutil.move(str(new_root), str(target))
+
+        _log("Перенос пользовательских списков и настроек ...")
+        for rel_path in USER_LISTS + USER_UTILS:
+            src = old_dir / rel_path
+            if src.exists():
+                dst = target / rel_path
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+        # carry over any custom strategy bats the user added
+        for bat in old_dir.glob("*.bat"):
+            if not (target / bat.name).exists():
+                shutil.copy2(bat, target / bat.name)
+
+        _log(f"Готово: {target.name}")
+        return target
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def is_frozen():
+    return getattr(sys, "frozen", False)
+
+
+def install_app_update(release, progress=None, cancel=None, log=None):
+    """Download new exe and stage a swap script. Returns script path to run.
+
+    Only works for a frozen (PyInstaller) build. Caller must quit the app
+    and launch the returned .bat, which waits for exit, replaces the exe
+    and relaunches it.
+    """
+    if not is_frozen():
+        raise RuntimeError("Самообновление доступно только в собранном .exe")
+
+    def _log(msg):
+        if log:
+            log(msg)
+
+    asset = github.pick_asset(release, ".exe")
+    if not asset:
+        raise FileNotFoundError("В релизе нет .exe файла")
+
+    exe_path = Path(sys.executable).resolve()
+    new_path = exe_path.with_name(exe_path.stem + "_new.exe")
+
+    _log(f"Скачивание {asset['name']} ...")
+    github.download(asset["url"], new_path, progress=progress, cancel=cancel)
+
+    pid = os.getpid()
+    exe_name = exe_path.name
+    script = Path(tempfile.gettempdir()) / "zapret_gui_selfupdate.bat"
+    lines = [
+        "@echo off",
+        "setlocal",
+        f'set "TARGET={exe_path}"',
+        f'set "NEW={new_path}"',
+        ":wait",
+        f'tasklist /FI "PID eq {pid}" /NH 2>nul | find /I "{exe_name}" >nul',
+        "if not errorlevel 1 (",
+        "  ping -n 2 127.0.0.1 >nul",
+        "  goto wait",
+        ")",
+        'move /y "%NEW%" "%TARGET%" >nul',
+        'start "" "%TARGET%"',
+        'del "%~f0"',
+    ]
+    script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    _log("Подготовка перезапуска ...")
+    return script
+
+
+def launch_swap_script(script):
+    subprocess.Popen(
+        ["cmd", "/c", str(script)],
+        creationflags=CREATE_NO_WINDOW,
+        close_fds=True,
+    )

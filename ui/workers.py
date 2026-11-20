@@ -1,0 +1,117 @@
+import threading
+
+from PySide6.QtCore import QThread, Signal
+
+from core import github, updater, tests
+from version import APP_VERSION, ZAPRET_REPO
+
+
+class CheckWorker(QThread):
+    done = Signal(object)  # dict: zapret, app, errors
+
+    def __init__(self, zapret_version, app_repo, parent=None):
+        super().__init__(parent)
+        self._zapret_version = zapret_version
+        self._app_repo = app_repo
+
+    def run(self):
+        result = {"zapret": None, "app": None, "errors": []}
+        try:
+            result["zapret"] = updater.check_zapret_update(self._zapret_version)
+        except Exception as e:
+            result["errors"].append(f"zapret: {e}")
+        if self._app_repo:
+            try:
+                result["app"] = updater.check_app_update(self._app_repo, APP_VERSION)
+            except Exception as e:
+                result["errors"].append(f"приложение: {e}")
+        self.done.emit(result)
+
+
+class ZapretInstallWorker(QThread):
+    progress = Signal(int, int)
+    log = Signal(str)
+    done = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, release, old_dir, parent=None):
+        super().__init__(parent)
+        self._release = release
+        self._old_dir = old_dir
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def run(self):
+        try:
+            new_dir = updater.install_zapret_update(
+                self._release, self._old_dir,
+                progress=lambda d, t: self.progress.emit(d, t),
+                cancel=self._cancel.is_set,
+                log=lambda m: self.log.emit(m),
+            )
+            self.done.emit(str(new_dir))
+        except InterruptedError:
+            self.error.emit("Обновление отменено")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class AppInstallWorker(QThread):
+    progress = Signal(int, int)
+    log = Signal(str)
+    done = Signal(str)  # swap script path
+    error = Signal(str)
+
+    def __init__(self, release, parent=None):
+        super().__init__(parent)
+        self._release = release
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def run(self):
+        try:
+            script = updater.install_app_update(
+                self._release,
+                progress=lambda d, t: self.progress.emit(d, t),
+                cancel=self._cancel.is_set,
+                log=lambda m: self.log.emit(m),
+            )
+            self.done.emit(str(script))
+        except InterruptedError:
+            self.error.emit("Обновление отменено")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class TestWorker(QThread):
+    log = Signal(str)
+    progress = Signal(int, int)
+    done = Signal(object)  # {"results": [...], "best": str}
+    error = Signal(str)
+
+    def __init__(self, zapret_dir, configs, parent=None):
+        super().__init__(parent)
+        self._dir = zapret_dir
+        self._configs = configs
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def run(self):
+        try:
+            results, best = tests.run_tests(
+                self._dir, self._configs,
+                log=lambda m: self.log.emit(m),
+                progress=lambda d, t: self.progress.emit(d, t),
+                cancel=self._cancel.is_set,
+            )
+            self.done.emit({"results": results, "best": best})
+        except InterruptedError:
+            self.error.emit("Тесты отменены")
+        except Exception as e:
+            self.error.emit(str(e))
