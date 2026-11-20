@@ -120,10 +120,7 @@ def main():
     app.setWindowIcon(icon)
 
     config = Config()
-    if not resolve_zapret_dir(config):
-        QMessageBox.information(
-            None, APP_NAME,
-            "Папка zapret не найдена автоматически.\nУкажите её в настройках (кнопка «Настройки»).")
+    resolve_zapret_dir(config)
 
     window = MainWindow(config, icon)
     if config.start_minimized and window.tray.isVisible():

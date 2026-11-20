@@ -1,11 +1,19 @@
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, Signal
 
 CREATE_NO_WINDOW = 0x08000000
+
+
+def project_root():
+    """Where a downloaded zapret is stored: next to the exe, or the repo root."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
 
 
 def _run_hidden(args, timeout=15):

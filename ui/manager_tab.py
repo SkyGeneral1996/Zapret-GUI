@@ -100,6 +100,7 @@ class FakesDialog(QDialog):
 class ManagerTab(QWidget):
     check_updates = Signal()
     changed = Signal()
+    need_zapret = Signal()
 
     def __init__(self, config, get_strategy, parent=None):
         super().__init__(parent)
@@ -226,7 +227,7 @@ class ManagerTab(QWidget):
     def _dir(self):
         d = self.config.zapret_dir
         if not d or not Path(d).is_dir():
-            QMessageBox.warning(self, "Ошибка", "Папка zapret не найдена. Укажите её в настройках.")
+            self.need_zapret.emit()
             return None
         return d
 
@@ -371,6 +372,22 @@ class ManagerTab(QWidget):
         d = self._dir()
         if not d:
             return
+        if zapret.is_zapret_service_running():
+            box = QMessageBox(self)
+            box.setWindowTitle("Служба zapret запущена")
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText("Служба zapret запущена: она перезапускает winws.exe и мешает тестам.\n"
+                        "Удалить службу и продолжить тестирование?")
+            go = box.addButton("Удалить службу и продолжить", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Отменить тесты", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is not go:
+                self._log("Тесты отменены: служба zapret запущена.")
+                return
+            svc.remove_services(log=self._log)
+            self._log("Служба удалена. При необходимости установите её заново после тестов.")
+            self.changed.emit()
+            self.refresh()
         parent = self.window()
         if self.test_scope.currentData() == "one":
             bat = parent.strategy_combo.currentText() if parent else ""

@@ -90,12 +90,7 @@ def _find_extracted_root(extract_dir):
     raise FileNotFoundError("bin/winws.exe not found in archive")
 
 
-def install_zapret_update(release, old_dir, progress=None, cancel=None, log=None):
-    """Download + extract new zapret next to old_dir, migrate user data.
-
-    Returns the new zapret directory Path. Old folder is left intact.
-    """
-    old_dir = Path(old_dir)
+def _fetch_and_extract(release, progress=None, cancel=None, log=None):
     asset = github.pick_asset(release, ".zip")
     if not asset:
         raise FileNotFoundError("В релизе нет .zip архива")
@@ -105,26 +100,55 @@ def install_zapret_update(release, old_dir, progress=None, cancel=None, log=None
             log(msg)
 
     tmp = Path(tempfile.mkdtemp(prefix="zapret_upd_"))
+    zip_path = tmp / asset["name"]
+    _log(f"Скачивание {asset['name']} ...")
+    github.download(asset["url"], zip_path, progress=progress, cancel=cancel)
+
+    _log("Распаковка ...")
+    extract_dir = tmp / "extracted"
+    extract_dir.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(extract_dir, filter="data")
+    return tmp, _find_extracted_root(extract_dir)
+
+
+def install_zapret_fresh(release, dest_root, progress=None, cancel=None, log=None):
+    """First-time download: extract zapret into dest_root (project folder)."""
+    dest_root = Path(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    tmp, new_root = _fetch_and_extract(release, progress, cancel, log)
     try:
-        zip_path = tmp / asset["name"]
-        _log(f"Скачивание {asset['name']} ...")
-        github.download(asset["url"], zip_path, progress=progress, cancel=cancel)
+        target = dest_root / new_root.name
+        if target.exists():
+            raise FileExistsError(f"Папка уже существует: {target}")
+        if log:
+            log("Установка ...")
+        shutil.move(str(new_root), str(target))
+        if log:
+            log(f"Готово: {target}")
+        return target
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
-        _log("Распаковка ...")
-        extract_dir = tmp / "extracted"
-        extract_dir.mkdir()
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(extract_dir, filter="data")
-        new_root = _find_extracted_root(extract_dir)
 
+def install_zapret_update(release, old_dir, progress=None, cancel=None, log=None):
+    """Download + extract new zapret next to old_dir, migrate user data.
+
+    Returns the new zapret directory Path. Old folder is left intact.
+    """
+    old_dir = Path(old_dir)
+    tmp, new_root = _fetch_and_extract(release, progress, cancel, log)
+    try:
         target = old_dir.parent / new_root.name
         if target.exists():
             raise FileExistsError(f"Папка уже существует: {target}")
 
-        _log("Установка новой версии ...")
+        if log:
+            log("Установка новой версии ...")
         shutil.move(str(new_root), str(target))
 
-        _log("Перенос пользовательских списков и настроек ...")
+        if log:
+            log("Перенос пользовательских списков и настроек ...")
         for rel_path in USER_LISTS + USER_UTILS:
             src = old_dir / rel_path
             if src.exists():
@@ -136,7 +160,8 @@ def install_zapret_update(release, old_dir, progress=None, cancel=None, log=None
             if not (target / bat.name).exists():
                 shutil.copy2(bat, target / bat.name)
 
-        _log(f"Готово: {target.name}")
+        if log:
+            log(f"Готово: {target.name}")
         return target
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

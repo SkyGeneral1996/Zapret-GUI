@@ -89,6 +89,38 @@ class AppInstallWorker(QThread):
             self.error.emit(str(e))
 
 
+class ZapretSetupWorker(QThread):
+    progress = Signal(int, int)
+    log = Signal(str)
+    done = Signal(str)  # new zapret dir
+    error = Signal(str)
+
+    def __init__(self, dest_root, parent=None):
+        super().__init__(parent)
+        self._dest = dest_root
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def run(self):
+        try:
+            rel = github.get_latest_release(ZAPRET_REPO)
+            if not rel:
+                raise RuntimeError("Не удалось получить последний релиз zapret")
+            new_dir = updater.install_zapret_fresh(
+                rel, self._dest,
+                progress=lambda d, t: self.progress.emit(d, t),
+                cancel=self._cancel.is_set,
+                log=lambda m: self.log.emit(m),
+            )
+            self.done.emit(str(new_dir))
+        except InterruptedError:
+            self.error.emit("Загрузка отменена")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class TestWorker(QThread):
     log = Signal(str)
     progress = Signal(int, int)

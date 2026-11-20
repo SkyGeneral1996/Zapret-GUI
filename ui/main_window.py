@@ -12,7 +12,7 @@ from core import github, zapret, updater
 from core import service as svc
 from ui.settings_dialog import SettingsDialog
 from ui.manager_tab import ManagerTab
-from ui.workers import CheckWorker, ZapretInstallWorker, AppInstallWorker
+from ui.workers import CheckWorker, ZapretInstallWorker, AppInstallWorker, ZapretSetupWorker
 from version import APP_NAME, APP_VERSION
 
 
@@ -29,6 +29,7 @@ class MainWindow(QMainWindow):
 
         self._check_worker = None
         self._install_worker = None
+        self._setup_worker = None
         self._zapret_release = None
         self._app_release = None
         self._external_running = False
@@ -42,8 +43,10 @@ class MainWindow(QMainWindow):
         self._build_tray()
         self.manager.check_updates.connect(lambda: self.check_updates(manual=True, mode="zapret"))
         self.manager.changed.connect(self._update_status)
+        self.manager.need_zapret.connect(self._offer_zapret_download)
         self._refresh_strategies()
         self._update_status()
+        QTimer.singleShot(0, self._ensure_zapret)
 
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_external)
@@ -450,6 +453,44 @@ class MainWindow(QMainWindow):
             lambda d, t: dlg.setValue(int(d * 100 / t) if t else 0))
         dlg.canceled.connect(worker.cancel)
         return dlg
+
+    # ---------- first-run zapret download ----------
+    def _ensure_zapret(self):
+        d = self.config.zapret_dir
+        if not d or not (Path(d) / "bin" / "winws.exe").exists():
+            self._offer_zapret_download()
+
+    def _offer_zapret_download(self):
+        if self._setup_worker and self._setup_worker.isRunning():
+            return
+        dest = zapret.project_root()
+        ans = QMessageBox.question(
+            self, "zapret не найден",
+            "Папка zapret не найдена на ПК.\n"
+            f"Скачать последнюю версию с GitHub автора и распаковать в:\n{dest}\n\n"
+            "Папка хранится внутри проекта (рядом с приложением) и обновляется из него.\n"
+            "Скачать?")
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self._setup_worker = ZapretSetupWorker(dest, self)
+        dlg = self._progress_dialog("Загрузка zapret", self._setup_worker)
+        self._setup_worker.log.connect(self._sys)
+        self._setup_worker.done.connect(lambda nd: self._on_zapret_setup(nd, dlg))
+        self._setup_worker.error.connect(lambda e: self._on_install_error(e, dlg))
+        self._setup_worker.start()
+        dlg.show()
+
+    def _on_zapret_setup(self, new_dir, dlg):
+        dlg.close()
+        self.config.zapret_dir = new_dir
+        self.config.save()
+        self._refresh_strategies()
+        self._update_status()
+        self._sys(f"zapret загружен: {new_dir}")
+        QMessageBox.information(
+            self, "Готово",
+            f"zapret {zapret.read_local_version(new_dir)} загружен в:\n{new_dir}\n\n"
+            "Выберите стратегию на вкладке «Запуск» и нажмите «Старт».")
 
     # ---------- settings / tray / close ----------
     def open_settings(self):
