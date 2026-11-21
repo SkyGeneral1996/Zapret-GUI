@@ -30,6 +30,18 @@ def normalize_version(tag):
     return tag.lstrip("vV").strip()
 
 
+def normalize_repo(value):
+    """Accept 'owner/repo' or a github.com URL and return 'owner/repo' ('' if invalid)."""
+    v = (value or "").strip()
+    m = re.match(r"^https?://(?:www\.)?github\.com/([^/]+/[^/]+?)(?:\.git)?/?$", v, re.I)
+    if m:
+        v = m.group(1)
+    v = v.removesuffix(".git").strip("/")
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", v):
+        return v
+    return ""
+
+
 def version_tuple(v):
     parts = re.findall(r"\d+", normalize_version(v))
     return tuple(int(p) for p in parts) if parts else (0,)
@@ -41,7 +53,8 @@ def is_newer(remote, local):
 
 def get_latest_release(repo):
     """Return Release for the latest published release, or None if none."""
-    if not repo or "/" not in repo:
+    repo = normalize_repo(repo)
+    if not repo:
         return None
     url = f"{API}/repos/{repo}/releases/latest"
     with _request(url) as resp:

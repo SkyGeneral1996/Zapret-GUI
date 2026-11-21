@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-from version import APP_REPO_DEFAULT
+from version import APP_REPO_DEFAULT, ZAPRET_REPO
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "ZapretGUI"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -31,6 +31,16 @@ class Config:
                     self._data[k] = stored[k]
         except (OSError, ValueError):
             pass
+        self._heal_app_repo()
+
+    def _heal_app_repo(self):
+        # older configs may store a full URL or the zapret repo by mistake;
+        # self-update must always point at this application's own repo
+        from core.github import normalize_repo
+        repo = normalize_repo(self._data.get("app_repo", ""))
+        if not repo or repo.lower() == ZAPRET_REPO.lower():
+            repo = APP_REPO_DEFAULT
+        self._data["app_repo"] = repo
 
     def save(self):
         try:

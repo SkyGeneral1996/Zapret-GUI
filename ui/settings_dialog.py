@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
 )
 
 from core import zapret
+from core.github import normalize_repo
+from version import APP_REPO_DEFAULT, ZAPRET_REPO
 
 
 class SettingsDialog(QDialog):
@@ -85,7 +87,10 @@ class SettingsDialog(QDialog):
                                 "В выбранной папке нет bin\\winws.exe.\nВыберите корректную папку zapret.")
             return
         self.config.zapret_dir = new_dir
-        self.config.app_repo = self.repo_edit.text().strip()
+        repo = normalize_repo(self.repo_edit.text())
+        if not repo or repo.lower() == ZAPRET_REPO.lower():
+            repo = APP_REPO_DEFAULT
+        self.config.app_repo = repo
         self.config.auto_check_updates = self.auto_check.isChecked()
         self.config.minimize_to_tray = self.tray_check.isChecked()
         self.config.start_minimized = self.start_min.isChecked()

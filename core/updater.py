@@ -71,6 +71,7 @@ def check_zapret_update(local_version):
 
 
 def check_app_update(repo, local_version):
+    repo = github.normalize_repo(repo)
     if not repo:
         return None
     rel = github.get_latest_release(repo)

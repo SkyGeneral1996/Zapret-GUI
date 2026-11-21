@@ -319,6 +319,8 @@ class MainWindow(QMainWindow):
     def _on_check_done(self, result, manual, mode):
         self.check_btn.setEnabled(True)
         self.check_btn.setText("Проверить обновления ПО")
+        for e in result["errors"]:
+            applog.write("UPD", f"check error (repo={self.config.app_repo}): {e}")
         if mode in ("both", "zapret"):
             self._zapret_release = result["zapret"]
             rel = self._zapret_release
