@@ -127,10 +127,11 @@ class TestWorker(QThread):
     done = Signal(object)  # {"results": [...], "best": str}
     error = Signal(str)
 
-    def __init__(self, zapret_dir, configs, parent=None):
+    def __init__(self, zapret_dir, configs, debug=False, parent=None):
         super().__init__(parent)
         self._dir = zapret_dir
         self._configs = configs
+        self._debug = debug
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -143,6 +144,7 @@ class TestWorker(QThread):
                 log=lambda m: self.log.emit(m),
                 progress=lambda d, t: self.progress.emit(d, t),
                 cancel=self._cancel.is_set,
+                debug=self._debug,
             )
             self.done.emit({"results": results, "best": best})
         except InterruptedError:

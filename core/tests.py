@@ -1,7 +1,9 @@
+import os
 import re
 import socket
 import ssl
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -31,6 +33,11 @@ DEFAULT_TARGETS = [
     ("Google DNS 8.8.4.4", "PING:8.8.4.4"),
     ("Quad9 DNS 9.9.9.9", "PING:9.9.9.9"),
 ]
+
+
+def debug_dir():
+    base = os.environ.get("APPDATA") or tempfile.gettempdir()
+    return Path(base) / "ZapretGUI" / "debug"
 
 
 def load_targets(zapret_dir):
@@ -95,52 +102,85 @@ def ping_ms(host, timeout=1000):
         return None
 
 
-def _start_winws(zapret_dir, bat):
+def _wait_winws_gone(timeout=2.0):
+    # WinDivert needs a moment to release the device after a kill,
+    # otherwise the next winws exits immediately.
+    deadline = time.time() + timeout
+    while zapret.is_winws_running() and time.time() < deadline:
+        time.sleep(0.1)
+
+
+def run_config(zapret_dir, bat, targets, cancel=None, log=None, winws_log=None):
+    zapret.kill_winws()
+    _wait_winws_gone()
     exe, args = zapret.parse_strategy(zapret_dir, bat)
+    detail = [f"cmd: {exe} " + " ".join(args)]
+    out = (open(winws_log, "w", encoding="utf-8", errors="replace")
+           if winws_log else subprocess.DEVNULL)
+    if winws_log:
+        detail.append(f"winws output: {winws_log}")
     proc = subprocess.Popen(
         [exe] + args, cwd=str(Path(zapret_dir) / "bin"),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=CREATE_NO_WINDOW,
+        stdout=out, stderr=out, creationflags=CREATE_NO_WINDOW,
     )
-    deadline = time.time() + 3
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            return None
-        if zapret.is_winws_running():
-            return proc
-        time.sleep(0.2)
-    return proc
-
-
-def run_config(zapret_dir, bat, targets, cancel=None, log=None):
-    zapret.kill_winws()
-    proc = _start_winws(zapret_dir, bat)
     tally = {"ok": 0, "err": 0, "ssl": 0, "unsup": 0, "ping_ok": 0, "ping_fail": 0}
+    started, exit_code = True, None
+    t0 = time.perf_counter()
     try:
-        if proc is None:
-            if log:
-                log(f"  [{bat}] не удалось запустить winws — пропуск")
-            return {"config": bat, **tally, "started": False}
-        time.sleep(0.8)
-        for t in targets:
-            if cancel and cancel():
-                raise InterruptedError()
-            if t["url"]:
-                for tls in ("HTTP", "TLS1.2", "TLS1.3"):
-                    st = check_url(t["url"], tls)
-                    key = {"OK": "ok", "ERROR": "err", "SSL": "ssl", "UNSUP": "unsup"}[st]
-                    tally[key] += 1
-            if t["ping"]:
-                ms = ping_ms(t["ping"])
-                if ms is None:
-                    tally["ping_fail"] += 1
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            if zapret.is_winws_running():
+                break
+            time.sleep(0.2)
+        if proc.poll() is not None:
+            started, exit_code = False, proc.returncode
+            detail.append(f"winws exited immediately, code {exit_code}")
+        else:
+            time.sleep(0.8)
+            if proc.poll() is not None:
+                started, exit_code = False, proc.returncode
+                detail.append(f"winws exited before checks, code {exit_code}")
+            else:
+                detail.append(f"winws pid {proc.pid} alive, checks starting")
+                for t in targets:
+                    if cancel and cancel():
+                        raise InterruptedError()
+                    if t["url"]:
+                        for tls in ("HTTP", "TLS1.2", "TLS1.3"):
+                            ts = time.perf_counter()
+                            st = check_url(t["url"], tls)
+                            ms = int((time.perf_counter() - ts) * 1000)
+                            key = {"OK": "ok", "ERROR": "err",
+                                   "SSL": "ssl", "UNSUP": "unsup"}[st]
+                            tally[key] += 1
+                            detail.append(f"{t['name']} {tls}: {st} ({ms} ms)")
+                    if t["ping"]:
+                        ts = time.perf_counter()
+                        ms = ping_ms(t["ping"])
+                        elapsed = int((time.perf_counter() - ts) * 1000)
+                        if ms is None:
+                            tally["ping_fail"] += 1
+                        else:
+                            tally["ping_ok"] += 1
+                        detail.append(f"{t['name']} ping: "
+                                      f"{ms if ms is not None else 'timeout'} ({elapsed} ms)")
+                exit_code = proc.poll()
+                if exit_code is not None:
+                    started = False
+                    detail.append(f"winws exited DURING checks, code {exit_code}")
                 else:
-                    tally["ping_ok"] += 1
-        return {"config": bat, **tally, "started": True}
+                    detail.append(f"winws pid {proc.pid} still alive after checks")
+        return {"config": bat, **tally, "started": started,
+                "seconds": round(time.perf_counter() - t0, 1),
+                "winws_exit": exit_code, "detail": detail}
     finally:
-        if proc is not None:
+        if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+        if winws_log:
+            out.close()
         zapret.kill_winws()
 
 
@@ -155,8 +195,20 @@ def best_of(results):
     return best
 
 
-def run_tests(zapret_dir, configs, targets=None, log=None, progress=None, cancel=None):
+def run_tests(zapret_dir, configs, targets=None, log=None, progress=None,
+              cancel=None, debug=False):
     targets = targets or load_targets(zapret_dir)
+    ddir = debug_dir()
+    ddir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    dbg_file = ddir / f"tests_{stamp}.log"
+    lines = []
+
+    def dbg(msg):
+        lines.append(msg)
+        if debug and log:
+            log(msg)
+
     results = []
     total = len(configs)
     try:
@@ -165,13 +217,23 @@ def run_tests(zapret_dir, configs, targets=None, log=None, progress=None, cancel
                 raise InterruptedError()
             if log:
                 log(f"[{i + 1}/{total}] Тест стратегии: {bat}")
-            r = run_config(zapret_dir, bat, targets, cancel=cancel, log=log)
+            wl = ddir / f"winws_{stamp}_{i + 1}_{Path(bat).stem}.log"
+            r = run_config(zapret_dir, bat, targets, cancel=cancel, winws_log=str(wl))
             results.append(r)
             if log:
                 log(f"  OK={r['ok']} ERR={r['err']} SSL={r['ssl']} UNSUP={r['unsup']} "
-                    f"PingOK={r['ping_ok']} PingFail={r['ping_fail']}")
+                    f"PingOK={r['ping_ok']} PingFail={r['ping_fail']} "
+                    f"за {r['seconds']} с"
+                    + ("" if r["started"] else "  [winws НЕ работал — результат недостоверен]"))
+            dbg(f"=== {bat} ({r['seconds']} s, started={r['started']}, "
+                f"winws_exit={r['winws_exit']}) ===")
+            for d in r["detail"]:
+                dbg("  " + d)
             if progress:
                 progress(i + 1, total)
     finally:
         zapret.kill_winws()
+        dbg_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if log:
+            log(f"Лог отладки: {dbg_file}")
     return results, best_of(results)

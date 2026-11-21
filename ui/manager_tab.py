@@ -3,10 +3,10 @@ from pathlib import Path
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core import service as svc
@@ -180,6 +180,9 @@ class ManagerTab(QWidget):
         test_row.addWidget(self.b_run_tests)
         test_row.addWidget(self.b_cancel_tests)
         tl.addLayout(test_row)
+        self.dbg_tests = QCheckBox("Отладка: подробный лог проверок (окно + файл)")
+        self.dbg_tests.setToolTip("Тайминги каждой цели, pid/код выхода winws и его вывод в файлах %APPDATA%/ZapretGUI/debug")
+        tl.addWidget(self.dbg_tests)
         self.test_progress = QProgressBar()
         self.test_progress.setRange(0, 100)
         self.test_progress.setValue(0)
@@ -193,11 +196,11 @@ class ManagerTab(QWidget):
         self.best_label = QLabel()
         self.best_label.setStyleSheet("color:#3fb950; font-weight:600;")
         rl.addWidget(self.best_label)
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
-            ["Стратегия", "OK", "ERR", "SSL", "UNSUP", "Ping OK", "Ping Fail"])
+            ["Стратегия", "OK", "ERR", "SSL", "UNSUP", "Ping OK", "Ping Fail", "Время, с"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in range(1, 7):
+        for c in range(1, 8):
             self.table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -411,7 +414,7 @@ class ManagerTab(QWidget):
         self.test_progress.setValue(0)
         self.g_results.hide()
 
-        self._test_worker = TestWorker(d, configs, self)
+        self._test_worker = TestWorker(d, configs, self.dbg_tests.isChecked(), self)
         self._test_worker.log.connect(self._log)
         self._test_worker.progress.connect(lambda v, t: self.test_progress.setValue(v))
         self._test_worker.done.connect(self._on_tests_done)
@@ -432,12 +435,19 @@ class ManagerTab(QWidget):
         results, best = payload["results"], payload["best"]
         self.table.setRowCount(len(results))
         for row, r in enumerate(results):
-            vals = [r["config"], r["ok"], r["err"], r["ssl"], r["unsup"], r["ping_ok"], r["ping_fail"]]
+            vals = [r["config"], r["ok"], r["err"], r["ssl"], r["unsup"],
+                    r["ping_ok"], r["ping_fail"], r.get("seconds", "")]
             for col, v in enumerate(vals):
                 item = QTableWidgetItem(str(v))
+                if not r.get("started", True):
+                    item.setBackground(QColor("#3a2222"))
                 if r["config"] == best:
                     item.setBackground(QColor("#1c3a24"))
                 self.table.setItem(row, col, item)
+        bad = [r["config"] for r in results if not r.get("started", True)]
+        if bad:
+            self._log("[X] winws не работал в: " + ", ".join(bad)
+                      + " — результаты недостоверны, см. лог отладки")
         self.best_label.setText(f"Лучшая стратегия: {best or 'не определена'}")
         self.g_results.show()
         self._scroll.ensureWidgetVisible(self.g_results)
