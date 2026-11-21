@@ -24,8 +24,26 @@ jobs:
       - name: Build exe
         run: python -m PyInstaller ZapretGUI.spec --noconfirm
 
+      - name: Read app version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = python -c "import version; print(version.APP_VERSION)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.version }} installer\ZapretGUI.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ZapretGUI.exe
+          files: |
+            dist/ZapretGUI.exe
+            dist/ZapretGUI-Setup.exe
           generate_release_notes: true
