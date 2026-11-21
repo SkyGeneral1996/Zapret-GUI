@@ -164,6 +164,45 @@ def is_zapret_service_running():
         return False
 
 
+def winws_snapshot():
+    """Command lines of running winws processes, for exact restore after tests."""
+    try:
+        r = _run_hidden([
+            "powershell", "-NoProfile", "-Command",
+            "(Get-CimInstance Win32_Process -Filter \"Name='winws.exe'\").CommandLine",
+        ], timeout=25)
+        return [l.strip() for l in r.stdout.splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def parse_commandline(cmdline):
+    m = re.match(r'\s*"?([^"]+?winws\.exe)"?\s*(.*)$', cmdline, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    return m.group(1), _split_args(m.group(2))
+
+
+def start_commandline(cmdline):
+    parsed = parse_commandline(cmdline)
+    if not parsed:
+        return None
+    exe, args = parsed
+    return subprocess.Popen(
+        [exe] + args, cwd=str(Path(exe).parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW,
+    )
+
+
+def restore_winws(snapshot):
+    for cmd in snapshot:
+        try:
+            start_commandline(cmd)
+        except Exception:
+            pass
+
+
 def _split_args(s):
     """Tokenize a Windows command tail: split on whitespace outside quotes,
     drop quote chars, preserve backslashes and spaces inside quoted paths."""

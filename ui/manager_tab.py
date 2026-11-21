@@ -1,17 +1,19 @@
+import csv
+import json
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from core import service as svc
-from core import zapret
-from ui.workers import TestWorker
+from core import applog, service as svc, tests, zapret
+from ui.workers import TestWorker, StabilityWorker
 
 
 class GameFilterDialog(QDialog):
@@ -207,8 +209,59 @@ class ManagerTab(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setMinimumHeight(180)
         rl.addWidget(self.table)
+        res_row = QHBoxLayout()
+        self.hist_combo = QComboBox()
+        self.hist_combo.setToolTip("История прогонов тестов (последние 10)")
+        self.hist_combo.currentIndexChanged.connect(self._on_history_pick)
+        self.b_apply_best = QPushButton("Применить лучшую")
+        self.b_apply_best.clicked.connect(self._apply_best)
+        self.b_export_csv = QPushButton("Экспорт CSV")
+        self.b_export_csv.clicked.connect(lambda: self._export("csv"))
+        self.b_export_json = QPushButton("Экспорт JSON")
+        self.b_export_json.clicked.connect(lambda: self._export("json"))
+        res_row.addWidget(self.hist_combo, 1)
+        res_row.addWidget(self.b_apply_best)
+        res_row.addWidget(self.b_export_csv)
+        res_row.addWidget(self.b_export_json)
+        rl.addLayout(res_row)
         self.g_results.hide()
         root.addWidget(self.g_results)
+
+        # STABILITY (probes while bypass keeps running)
+        g_stab = QGroupBox("Стабильность соединения")
+        sl = QVBoxLayout(g_stab)
+        stab_row = QHBoxLayout()
+        self.stab_rounds = QComboBox()
+        for n in (10, 20, 30):
+            self.stab_rounds.addItem(f"{n} проб (≈{n * 2 + n * 3} с)", n)
+        self.b_stab = QPushButton("Проверить стабильность")
+        self.b_stab.clicked.connect(self._stability)
+        self.b_stab_cancel = QPushButton("Отмена")
+        self.b_stab_cancel.clicked.connect(self._cancel_stability)
+        self.b_stab_cancel.hide()
+        stab_row.addWidget(self.stab_rounds, 1)
+        stab_row.addWidget(self.b_stab)
+        stab_row.addWidget(self.b_stab_cancel)
+        sl.addLayout(stab_row)
+        self.stab_progress = QProgressBar()
+        self.stab_progress.setRange(0, 100)
+        self.stab_progress.setValue(0)
+        self.stab_progress.setFormat("Пробы: %v/%m")
+        sl.addWidget(self.stab_progress)
+        self.stab_verdict = QLabel()
+        sl.addWidget(self.stab_verdict)
+        self.stab_table = QTableWidget(0, 8)
+        self.stab_table.setHorizontalHeaderLabels(
+            ["Цель", "OK/Проб", "Потери %", "Avg ms", "Min ms", "Max ms",
+             "Jitter ms", "Ping avg ms"])
+        self.stab_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in range(1, 8):
+            self.stab_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.stab_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.stab_table.verticalHeader().setVisible(False)
+        self.stab_table.setMinimumHeight(140)
+        sl.addWidget(self.stab_table)
+        root.addWidget(g_stab)
 
         self.out = QPlainTextEdit()
         self.out.setReadOnly(True)
@@ -222,9 +275,11 @@ class ManagerTab(QWidget):
         outer.addWidget(scroll)
         self._scroll = scroll
         self.refresh()
+        self._refresh_history()
 
     # ---------- helpers ----------
     def _log(self, msg):
+        applog.write("MGR", msg)
         self.out.appendPlainText(msg)
 
     def _dir(self):
@@ -375,6 +430,8 @@ class ManagerTab(QWidget):
         d = self._dir()
         if not d:
             return
+        self._removed_service = ""
+        service_bat = svc.installed_strategy() if zapret.is_zapret_service_running() else ""
         if zapret.is_zapret_service_running():
             box = QMessageBox(self)
             box.setWindowTitle("Служба zapret запущена")
@@ -388,7 +445,8 @@ class ManagerTab(QWidget):
                 self._log("Тесты отменены: служба zapret запущена.")
                 return
             svc.remove_services(log=self._log)
-            self._log("Служба удалена. При необходимости установите её заново после тестов.")
+            self._removed_service = service_bat
+            self._log("Служба удалена на время тестов.")
             self.changed.emit()
             self.refresh()
         parent = self.window()
@@ -401,8 +459,12 @@ class ManagerTab(QWidget):
             QMessageBox.warning(self, "Тесты", "Нет стратегий для тестирования.")
             return
 
-        self._test_was_running = bool(parent and parent.runner.is_running()) or zapret.is_winws_running()
-        if parent and parent.runner.is_running():
+        runner_was = bool(parent and parent.runner.is_running())
+        self._test_restore = {
+            "runner": runner_was,
+            "snapshot": [] if runner_was else zapret.winws_snapshot(),
+        }
+        if runner_was:
             parent.runner.stop()
         zapret.kill_winws()
 
@@ -433,6 +495,48 @@ class ManagerTab(QWidget):
     def _on_tests_done(self, payload):
         self._tests_finished()
         results, best = payload["results"], payload["best"]
+        self._last_results, self._last_best = results, best
+        self._fill_table(results, best)
+        bad = [r["config"] for r in results if not r.get("started", True)]
+        if bad:
+            self._log("[X] winws не работал в: " + ", ".join(bad)
+                      + " — результаты недостоверны, см. лог отладки")
+        self._log(f"Тесты завершены. Лучшая стратегия: {best or 'не определена'}")
+        self._save_history(results, best)
+        self._restore_after_tests()
+
+    def _on_tests_error(self, msg):
+        self._tests_finished()
+        self._log(f"[X] {msg}")
+        self._restore_after_tests()
+
+    def _restore_after_tests(self):
+        parent = self.window()
+        r = getattr(self, "_test_restore", {})
+        if r.get("runner") and parent:
+            self._log("Восстановление ранее работавшей стратегии ...")
+            parent.start_strategy()
+        elif r.get("snapshot"):
+            self._log("Восстановление ранее работавших winws (точные аргументы) ...")
+            zapret.restore_winws(r["snapshot"])
+        bat = getattr(self, "_removed_service", "")
+        if bat:
+            self._removed_service = ""
+            ans = QMessageBox.question(
+                self, "Служба zapret",
+                f"Вернуть службу zapret со стратегией {bat}, удалённую на время тестов?")
+            if ans == QMessageBox.StandardButton.Yes:
+                d = self.config.zapret_dir
+                try:
+                    svc.install_service(d, bat, log=self._log)
+                    self.changed.emit()
+                    self.refresh()
+                except Exception as e:
+                    self._log(f"[X] Ошибка установки службы: {e}")
+
+    # ---------- results table / history / export ----------
+    def _fill_table(self, results, best):
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(results))
         for row, r in enumerate(results):
             vals = [r["config"], r["ok"], r["err"], r["ssl"], r["unsup"],
@@ -444,22 +548,140 @@ class ManagerTab(QWidget):
                 if r["config"] == best:
                     item.setBackground(QColor("#1c3a24"))
                 self.table.setItem(row, col, item)
-        bad = [r["config"] for r in results if not r.get("started", True)]
-        if bad:
-            self._log("[X] winws не работал в: " + ", ".join(bad)
-                      + " — результаты недостоверны, см. лог отладки")
+        self.table.setSortingEnabled(True)
         self.best_label.setText(f"Лучшая стратегия: {best or 'не определена'}")
         self.g_results.show()
         self._scroll.ensureWidgetVisible(self.g_results)
-        self._log(f"Тесты завершены. Лучшая стратегия: {best or 'не определена'}")
-        parent = self.window()
-        if self._test_was_running and parent:
-            self._log("Восстановление ранее работавшей стратегии ...")
-            parent.start_strategy()
 
-    def _on_tests_error(self, msg):
-        self._tests_finished()
-        self._log(f"[X] {msg}")
+    def _history_file(self):
+        return tests.debug_dir().parent / "history.json"
+
+    def _save_history(self, results, best):
+        try:
+            f = self._history_file()
+            hist = json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
+            hist.insert(0, {"ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "results": results, "best": best})
+            f.write_text(json.dumps(hist[:10], ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            self._log(f"[X] Не удалось сохранить историю: {e}")
+        self._refresh_history()
+
+    def _refresh_history(self):
+        self.hist_combo.blockSignals(True)
+        self.hist_combo.clear()
+        try:
+            f = self._history_file()
+            hist = json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
+        except Exception:
+            hist = []
+        for i, h in enumerate(hist):
+            self.hist_combo.addItem(f"{h['ts']}  (лучшая: {h['best'] or '—'})", i)
+        self.hist_combo.blockSignals(False)
+
+    def _on_history_pick(self, idx):
+        if idx < 0:
+            return
+        try:
+            hist = json.loads(self._history_file().read_text(encoding="utf-8"))
+            h = hist[self.hist_combo.itemData(idx)]
+        except Exception:
+            return
+        self._last_results, self._last_best = h["results"], h["best"]
+        self._fill_table(h["results"], h["best"])
+
+    def _export(self, kind):
+        results = getattr(self, "_last_results", None)
+        if not results:
+            return
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт результатов", f"zapret_tests_{ts}.{kind}",
+            f"{'CSV' if kind == 'csv' else 'JSON'} (*.{kind})")
+        if not path:
+            return
+        try:
+            if kind == "csv":
+                with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                    w = csv.writer(f)
+                    w.writerow(["config", "ok", "err", "ssl", "unsup",
+                                "ping_ok", "ping_fail", "seconds", "started"])
+                    for r in results:
+                        w.writerow([r["config"], r["ok"], r["err"], r["ssl"], r["unsup"],
+                                    r["ping_ok"], r["ping_fail"], r.get("seconds", ""),
+                                    r.get("started", True)])
+            else:
+                Path(path).write_text(json.dumps(
+                    {"best": self._last_best, "results": results},
+                    ensure_ascii=False, indent=1), encoding="utf-8")
+            self._log(f"Результаты экспортированы: {path}")
+        except Exception as e:
+            self._log(f"[X] Ошибка экспорта: {e}")
+
+    def _apply_best(self):
+        best = getattr(self, "_last_best", None)
         parent = self.window()
-        if getattr(self, "_test_was_running", False) and parent:
-            parent.start_strategy()
+        if not best or not parent:
+            return
+        idx = parent.strategy_combo.findText(best)
+        if idx < 0:
+            self._log(f"[X] Стратегия {best} не найдена в списке")
+            return
+        parent.strategy_combo.setCurrentIndex(idx)
+        self._log(f"Применяется лучшая стратегия: {best}")
+        parent.start_strategy()
+
+    # ---------- stability ----------
+    def _stability(self):
+        d = self._dir()
+        if not d:
+            return
+        rounds = self.stab_rounds.currentData()
+        self._log(f"--- Проверка стабильности ({rounds} проб, обход не останавливается) ---")
+        self.b_stab.setEnabled(False)
+        self.stab_rounds.setEnabled(False)
+        self.b_stab_cancel.show()
+        self.stab_progress.setRange(0, rounds)
+        self.stab_progress.setValue(0)
+        self.stab_verdict.setText("")
+        self._stab_worker = StabilityWorker(d, rounds, self)
+        self._stab_worker.log.connect(self._log)
+        self._stab_worker.progress.connect(lambda v, t: self.stab_progress.setValue(v))
+        self._stab_worker.done.connect(self._on_stab_done)
+        self._stab_worker.error.connect(self._on_stab_error)
+        self._stab_worker.start()
+
+    def _cancel_stability(self):
+        if getattr(self, "_stab_worker", None):
+            self._stab_worker.cancel()
+
+    def _stab_finished(self):
+        self.b_stab.setEnabled(True)
+        self.stab_rounds.setEnabled(True)
+        self.b_stab_cancel.hide()
+
+    def _on_stab_done(self, payload):
+        self._stab_finished()
+        rows, verdict = payload["rows"], payload["verdict"]
+        self.stab_table.setRowCount(len(rows))
+        for row, r in enumerate(rows):
+            vals = [r["name"], f"{r['ok']}/{r['probes']}", r["loss"],
+                    r["avg"] if r["avg"] is not None else "—",
+                    r["min"] if r["min"] is not None else "—",
+                    r["max"] if r["max"] is not None else "—",
+                    r["jitter"] if r["jitter"] is not None else "—",
+                    r["ping_avg"] if r["ping_avg"] is not None else "—"]
+            for col, v in enumerate(vals):
+                item = QTableWidgetItem(str(v))
+                if r["loss"] > 0 or (r["ping_loss"] or 0) > 0:
+                    item.setBackground(QColor("#3a2222"))
+                self.stab_table.setItem(row, col, item)
+        ok = verdict.startswith("Стабильно")
+        self.stab_verdict.setStyleSheet(
+            f"color:{'#3fb950' if ok else '#f85149'}; font-weight:600;")
+        self.stab_verdict.setText(verdict)
+        self._log(verdict)
+
+    def _on_stab_error(self, msg):
+        self._stab_finished()
+        self._log(f"[X] {msg}")

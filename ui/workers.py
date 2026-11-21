@@ -2,7 +2,7 @@ import threading
 
 from PySide6.QtCore import QThread, Signal
 
-from core import github, updater, tests
+from core import github, updater, tests, stability
 from version import APP_VERSION, ZAPRET_REPO
 
 
@@ -149,5 +149,35 @@ class TestWorker(QThread):
             self.done.emit({"results": results, "best": best})
         except InterruptedError:
             self.error.emit("Тесты отменены")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class StabilityWorker(QThread):
+    log = Signal(str)
+    progress = Signal(int, int)
+    done = Signal(object)  # {"rows": [...], "verdict": str}
+    error = Signal(str)
+
+    def __init__(self, zapret_dir, rounds, parent=None):
+        super().__init__(parent)
+        self._dir = zapret_dir
+        self._rounds = rounds
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def run(self):
+        try:
+            rows, verdict = stability.run_stability(
+                self._dir, rounds=self._rounds,
+                log=lambda m: self.log.emit(m),
+                progress=lambda d, t: self.progress.emit(d, t),
+                cancel=self._cancel.is_set,
+            )
+            self.done.emit({"rows": rows, "verdict": verdict})
+        except InterruptedError:
+            self.error.emit("Проверка стабильности отменена")
         except Exception as e:
             self.error.emit(str(e))

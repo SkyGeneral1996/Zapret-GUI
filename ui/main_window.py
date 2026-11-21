@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import github, zapret, updater
+from core import applog
 from core import service as svc
 from ui.settings_dialog import SettingsDialog
 from ui.manager_tab import ManagerTab
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
         self._tray_notified = False
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
+        applog.write("APP", f"{APP_NAME} {APP_VERSION} start")
         self.setWindowIcon(icon)
         self.resize(880, 780)
 
@@ -192,6 +194,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(line)
 
     def _sys(self, msg):
+        applog.write("GUI", msg)
         self.log.appendPlainText(f"[GUI] {msg}")
 
     def _clear_logs(self):
